@@ -1,26 +1,26 @@
 /*  OctoWS2811 movie2serial.pde - Transmit video data to 1 or more
-      Teensy 3.0 boards running OctoWS2811 VideoDisplay.ino
-    http://www.pjrc.com/teensy/td_libs_OctoWS2811.html
-    Copyright (c) 2013 Paul Stoffregen, PJRC.COM, LLC
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in
-    all copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-    THE SOFTWARE.
-*/
+ Teensy 3.0 boards running OctoWS2811 VideoDisplay.ino
+ http://www.pjrc.com/teensy/td_libs_OctoWS2811.html
+ Copyright (c) 2013 Paul Stoffregen, PJRC.COM, LLC
+ 
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ 
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ 
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
+ */
 
 // To configure this program, edit the following sections:
 //
@@ -36,14 +36,18 @@
 //  4: if playing 50 or 60 Hz progressive video (or faster),
 //     edit framerate in movieEvent().
 
-import processing.video.*;
 import processing.serial.*;
 import java.awt.Rectangle;
 
-Movie myMovie = new Movie(this, "/tmp/Toy_Story.avi");
+import hypermedia.net.*;
+
+import java.util.concurrent.*;
 
 int numPorts=0;  // the number of serial ports in use
-int maxPorts=24; // maximum number of serial ports
+int maxPorts=3; // maximum number of serial ports
+String[] serialPorts = {
+  "COM16", "COM19", "COM17"
+};
 
 Serial[] ledSerial = new Serial[maxPorts];     // each port's actual Serial port
 Rectangle[] ledArea = new Rectangle[maxPorts]; // the area of the movie each port gets, in % (0-100)
@@ -52,35 +56,126 @@ PImage[] ledImage = new PImage[maxPorts];      // image sent to each port
 int errorCount=0;
 float framerate=0;
 
+// Display configuration
+final static int displayWidth = 60;
+final static int displayHeight = 24;
+final int ledCount = displayHeight*displayWidth;
+
+boolean VERTICAL = true;
+int FRAMERATE = 10;
+
+int packet_length = ledCount*3 + 1;
+
+final int displayPadding = 50;
+
+PImage nextImage = new PImage(displayWidth, displayHeight);
+
+Boolean demoMode = true;
+BlockingQueue newImageQueue;
+
+// domestar interaction components
+DemoTransmitter demoTransmitter;
+
+UDP udp;
+
 void setup() {
+  // create window
+  size(60+2*displayPadding, 32+2*displayPadding);  // create the window
+  //size(displayWidth, displayHeight);
+  //size(480, 400);  // create the window
+
+  // configure output
   String[] list = Serial.list();
   delay(20);
   println("Serial Ports List:");
   println(list);
-  serialConfigure("/dev/ttyACM0");  // change these to your port names
-  serialConfigure("/dev/ttyACM1");
+  for (int i=0; i<maxPorts; i++) {
+    serialConfigure(serialPorts[i]);
+  }
   if (errorCount > 0) exit();
-  size(480, 400);  // create the window
-  myMovie.loop();  // start the movie :-)
+
+  newImageQueue = new ArrayBlockingQueue(2);
+
+  // configure input
+  udp = new UDP( this, 58082 );
+  udp.listen( true );
+
+  demoTransmitter = new DemoTransmitter();
+  demoTransmitter.start();
 }
 
- 
+int maxConvertedByte = 0;
+
+int convertByte(byte b) {
+  int c = (b<0) ? 256+b : b;
+
+  if (c > maxConvertedByte) {
+    maxConvertedByte = c;
+    println("Max Converted Byte is now " + c);
+  }  
+
+  return c;
+}
+
+void receive(byte[] data, String ip, int port) {  
+  //println(" new datas!");
+  if (demoMode) {
+    println("Started receiving data from " + ip + ". Demo mode disabled.");
+    demoMode = false;
+  }
+
+  if (data[0] == 2) {
+    // We got a new mode, so copy it out
+    String modeName = new String(data);
+    return;
+  }
+
+  if (data[0] != 1) {
+    println("Packet header mismatch. Expected 1, got " + data[0]);
+    return;
+  }
+
+  if (data.length != packet_length) {
+    println("Packet size mismatch. Expected "+packet_length+", got " + data.length);
+    return;
+  }
+
+  if (newImageQueue.size() > 0) {
+    println("Buffer full, dropping frame!");
+    return;
+  }
+
+  color[] newImage = new color[ledCount];
+
+  for (int i=0; i< (ledCount); i++) {
+    // Processing doesn't like it when you call the color function while in an event
+    // go figure
+    newImage[i] = (int)(0xff<<24 | convertByte(data[i*3 + 1])<<16) |
+      (convertByte(data[i*3 + 2])<<8) |
+      (convertByte(data[i*3 + 3]));
+  }
+  try {
+    newImageQueue.put(newImage);
+  } 
+  catch( InterruptedException e ) {
+    println("Interrupted Exception caught");
+  }
+}
+
 // movieEvent runs for each new frame of movie data
-void movieEvent(Movie m) {
-  // read the movie's next frame
-  m.read();
-  
-  //if (framerate == 0) framerate = m.getSourceFrameRate();
-  framerate = 30.0; // TODO, how to read the frame rate???
-  
+void frameUpdate(PImage f) {
+
   for (int i=0; i < numPorts; i++) {    
     // copy a portion of the movie's image to the LED image
-    int xoffset = percentage(m.width, ledArea[i].x);
-    int yoffset = percentage(m.height, ledArea[i].y);
-    int xwidth =  percentage(m.width, ledArea[i].width);
-    int yheight = percentage(m.height, ledArea[i].height);
-    ledImage[i].copy(m, xoffset, yoffset, xwidth, yheight,
-                     0, 0, ledImage[i].width, ledImage[i].height);
+    int xoffset = percentage(f.width, ledArea[i].x);
+    int yoffset = percentage(f.height, ledArea[i].y);
+    int xwidth =  percentage(f.width, ledArea[i].width);
+    int yheight = percentage(f.height, ledArea[i].height);
+
+    ledImage[i].copy(f, xoffset, yoffset, xwidth, yheight, 0, 0, ledImage[i].width, ledImage[i].height);
+
+    //println(i+": "+xoffset+" "+yoffset+" "+xwidth+" "+yheight+" "+0+" "+0+" "+ledImage[i].width+" "+ledImage[i].height);
+
     // convert the LED image to raw data
     byte[] ledData =  new byte[(ledImage[i].width * ledImage[i].height * 3) + 3];
     image2data(ledImage[i], ledData, ledLayout[i]);
@@ -89,15 +184,18 @@ void movieEvent(Movie m) {
       int usec = (int)((1000000.0 / framerate) * 0.75);
       ledData[1] = (byte)(usec);   // request the frame sync pulse
       ledData[2] = (byte)(usec >> 8); // at 75% of the frame time
-    } else {
+    } 
+    else {
       ledData[0] = '%';  // others sync to the master board
       ledData[1] = 0;
       ledData[2] = 0;
     }
     // send the raw data to the LEDs  :-)
-    ledSerial[i].write(ledData); 
+    //println("write len: "+ledData.length);
+    ledSerial[i].write(ledData);
   }
 }
+
 
 // image2data converts an image to OctoWS2811's raw data format.
 // The number of vertical pixels in the image must be a multiple
@@ -107,14 +205,15 @@ void image2data(PImage image, byte[] data, boolean layout) {
   int x, y, xbegin, xend, xinc, mask;
   int linesPerPin = image.height / 8;
   int pixel[] = new int[8];
-  
+
   for (y = 0; y < linesPerPin; y++) {
     if ((y & 1) == (layout ? 0 : 1)) {
       // even numbered rows are left to right
       xbegin = 0;
       xend = image.width;
       xinc = 1;
-    } else {
+    } 
+    else {
       // odd numbered rows are right to left
       xbegin = image.width - 1;
       xend = -1;
@@ -135,7 +234,7 @@ void image2data(PImage image, byte[] data, boolean layout) {
         data[offset++] = b;
       }
     }
-  } 
+  }
 }
 
 // translate the 24 bit color from RGB to the actual
@@ -156,7 +255,8 @@ void serialConfigure(String portName) {
     ledSerial[numPorts] = new Serial(this, portName);
     if (ledSerial[numPorts] == null) throw new NullPointerException();
     ledSerial[numPorts].write('?');
-  } catch (Throwable e) {
+  } 
+  catch (Throwable e) {
     println("Serial port " + portName + " does not exist or is non-functional");
     errorCount++;
     return;
@@ -169,47 +269,72 @@ void serialConfigure(String portName) {
     errorCount++;
     return;
   }
+
   String param[] = line.split(",");
   if (param.length != 12) {
     println("Error: port " + portName + " did not respond to LED config query");
     errorCount++;
     return;
   }
+  print("port "+numPorts+": ");
+  print(line);
+
+
   // only store the info and increase numPorts if Teensy responds properly
   ledImage[numPorts] = new PImage(Integer.parseInt(param[0]), Integer.parseInt(param[1]), RGB);
-  ledArea[numPorts] = new Rectangle(Integer.parseInt(param[5]), Integer.parseInt(param[6]),
-                     Integer.parseInt(param[7]), Integer.parseInt(param[8]));
+
+  ledArea[numPorts] = new Rectangle(Integer.parseInt(param[5]), Integer.parseInt(param[6]), 
+  Integer.parseInt(param[7]), Integer.parseInt(param[8]));
   ledLayout[numPorts] = (Integer.parseInt(param[5]) == 0);
   numPorts++;
 }
 
 // draw runs every time the screen is redrawn - show the movie...
 void draw() {
-  // show the original video
-  image(myMovie, 0, 80);
-  
-  // then try to show what was most recently sent to the LEDs
-  // by displaying all the images for each port.
-  for (int i=0; i < numPorts; i++) {
-    // compute the intended size of the entire LED array
-    int xsize = percentageInverse(ledImage[i].width, ledArea[i].width);
-    int ysize = percentageInverse(ledImage[i].height, ledArea[i].height);
-    // computer this image's position within it
-    int xloc =  percentage(xsize, ledArea[i].x);
-    int yloc =  percentage(ysize, ledArea[i].y);
-    // show what should appear on the LEDs
-    image(ledImage[i], 240 - xsize / 2 + xloc, 10 + yloc);
-  } 
+  if (newImageQueue.size() > 0) {
+    color[] newImage = (color[])newImageQueue.remove();
+
+    // now need to stuff the values into a PImage
+    nextImage.loadPixels();
+    for (int i=0; i<displayHeight; i++) {
+      for (int j=0; j<displayWidth; j++) {
+        //int loc = i*displayWidth+j;
+        int loc = i+j*displayHeight;
+
+        // Set the display pixel to the image pixel
+        nextImage.pixels[loc] = color(newImage[loc]);
+      }
+    }
+    nextImage.updatePixels();
+
+
+    image(nextImage, displayPadding, displayPadding);
+    /*
+    // then try to show what was most recently sent to the LEDs
+     // by displaying all the images for each port.
+     for (int i=0; i < numPorts; i++) {
+     // compute the intended size of the entire LED array
+     int xsize = percentageInverse(ledImage[i].width, ledArea[i].width);
+     int ysize = percentageInverse(ledImage[i].height, ledArea[i].height);
+     // computer this image's position within it
+     int xloc =  percentage(xsize, ledArea[i].x);
+     int yloc =  percentage(ysize, ledArea[i].y);
+     // show what should appear on the LEDs
+     image(ledImage[i], 240 - xsize / 2 + xloc, 10 + yloc);
+     }
+     */
+
+    frameUpdate(nextImage);
+  }
 }
 
 // respond to mouse clicks as pause/play
 boolean isPlaying = true;
 void mousePressed() {
   if (isPlaying) {
-    myMovie.pause();
     isPlaying = false;
-  } else {
-    myMovie.play();
+  } 
+  else {
     isPlaying = true;
   }
 }
